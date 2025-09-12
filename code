@@ -1,13 +1,10 @@
 import pandas as pd
 import numpy as np
-import random
-from imblearn.over_sampling import SMOTE
-from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, roc_auc_score
-from sklearn.compose import make_column_transformer, ColumnTransformer
+from sklearn.compose import make_column_selector, ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, StackingClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
@@ -283,11 +280,9 @@ def create_preprocessor():
         ('scaler', RobustScaler())                     # Масштабируем данные
     ])
     
-    preprocessor = make_column_transformer(
-        (RobustScaler(), make_column_selector(dtype_include=np.number)),
-        (PowerTransformer(), make_column_selector(dtype_include=np.number)),  # Если PowerTransformer необходим
-        (OneHotEncoder(handle_unknown='ignore'), make_column_selector(dtype_include=['category', 'object']))
-    )
+    preprocessor = ColumnTransformer(transformers=[
+        ('num', transformer, make_column_selector(dtype_include=np.number))  # Работаем только с численными признаками
+    ], remainder='drop')
     
     return preprocessor
 
@@ -343,7 +338,6 @@ def train_and_evaluate_logreg(X, y, preprocessor):
     
     return best_estimator
 
-    
 # Главная функция
 def main():
     print("=== ЗАПУСК ЭКСПЕРИМЕНТА ===")
@@ -429,4 +423,4 @@ def main():
 
 # Запуск основной функции
 if __name__ == "__main__":
-    main()
+    main()                                                                                                                                                                                                   
