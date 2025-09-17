@@ -1,5 +1,8 @@
+# Необходимые импорты
 import pandas as pd
 import numpy as np
+import random
+import csv
 from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -15,13 +18,16 @@ from sklearn.impute import SimpleImputer
 from sklearn.feature_selection import SelectFromModel, RFE
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import PCA
+from datetime import datetime
+from scipy import stats
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.utils.class_weight import compute_sample_weight
+from imblearn.over_sampling import SMOTE
 import joblib
 import warnings
 import os
-import csv
-from scipy import stats
 
-# Настройки
+# Дополнительный настройки
 warnings.filterwarnings("ignore")
 pd.set_option('display.max_columns', None)
 sns.set_style("whitegrid")
@@ -30,12 +36,12 @@ SEED = 42
 np.random.seed(SEED)
 random.seed(SEED)
 
-# Функция для надежной загрузки CSV с проблемным форматом
+# Загрузка CSV-файлов
 def robust_csv_loader(file_path, delimiter=None):
-    """Загрузка CSV с обработкой ошибок формата"""
+    """Загрузка CSV с обработкой возможных ошибок формата."""
     print(f"Загрузка файла: {file_path}")
     
-    possible_delimiters = [';', ',', '\t', '|'] if delimiter is None else [delimiter]
+    possible_delimiters = [';', ','] if delimiter is None else [delimiter]
     
     for delim in possible_delimiters:
         try:
@@ -46,8 +52,7 @@ def robust_csv_loader(file_path, delimiter=None):
         except Exception as e:
             print(f"Ошибка с разделителем '{delim}': {e}")
     
-    # Если обычные методы не сработали, пробуем пропустить ошибки
-    print("Пробуем загрузку с пропуском ошибочных строк...")
+    print("Пропускаем неправильные строки...")
     for delim in possible_delimiters:
         try:
             df = pd.read_csv(file_path, delimiter=delim, on_bad_lines='skip', engine='python', encoding='utf-8')
@@ -59,9 +64,11 @@ def robust_csv_loader(file_path, delimiter=None):
     
     return pd.DataFrame()
 
-# Безопасная загрузка данных
+# Обработка данных
 def safe_load_data():
-    """Безопасная загрузка данных с обработкой ошибок"""
+    """
+    Безопасная загрузка данных с обработкой ошибок
+    """
     train_path = "ads.csv"
     test_path = "test.csv"
     
@@ -78,7 +85,7 @@ def safe_load_data():
     print(f"Размер данных: {train.shape}")
     print("Первые 3 строки данных:\n", train.head(3))
     
-    # Определяем целевую переменную
+    # Целевая переменной
     target_candidates = ['successful', 'target', 'label', 'y', 'class', 'result']
     target_column = next((c for c in target_candidates if c in train.columns), train.columns[-1])
     print(f"Целевая переменная: {target_column}")
@@ -94,78 +101,24 @@ def safe_load_data():
     
     return train, test, target_column
 
-# Балансировка классов методом over-sampling
-def balance_classes(X, y):
-    """Балансировка классов путём увеличения меньшинства"""
-    from collections import Counter
-    
-    counts = Counter(y)
-    print(f"Исходное распределение классов: {counts}")
-    
-    if len(counts) < 2:
-        return X, y
-    
-    major_class = max(counts, key=counts.get)
-    minor_class = min(counts, key=counts.get)
-    max_count = counts[major_class]
-    
-    indices = []
-    for label in counts.keys():
-        idx = np.where(y == label)[0]
-        if label == minor_class:
-            idx = np.random.choice(idx, max_count, replace=True)
-        indices.extend(idx)
-    
-    balanced_X = X.iloc[indices]
-    balanced_y = y.iloc[indices]
-    
-    print(f"После балансировки: {Counter(balanced_y)}")
-    return balanced_X, balanced_y
-
-# Расширенная предобработка данных
 def preprocess_data(train, test, target_col):
-    """Подготовка данных с дополнительной обработкой и очищением"""
+    """
+    Подготовка данных с дополнительной обработкой и очищением
+    """
     original_idx = train.index
     
-    # Удаляем дублирующиеся записи и пустые строки
+    
+    if test is None:
+        test = pd.DataFrame()
+    
+    
     train = train.drop_duplicates().dropna(how='all')
     if not test.empty:
         test = test.drop_duplicates().dropna(how='all')
     
     print(f"После удаления дубликатов: {len(train)} строк")
     
-    # Исключаем лишние столбцы
-    cols_to_remove = ['Unnamed: 0', 'unnamed: 0', 'index']
-    for col in cols_to_remove:
-        if col in train.columns and col != target_col:
-            train = train.drop(columns=[col])
-            print(f"Удалена колонка из train: {col}")
-        if not test.empty and col in test.columns and col != target_col:
-            test = test.drop(columns=[col])
-            print(f"Удалена колонка из test: {col}")
     
-    # Конвертирование колонки publishers в числовую форму
-    def convert_publishers(df, col_name='publishers'):
-        if col_name not in df.columns:
-            return df
-        
-        temp_df = df.copy()
-        unique_publishers = set()
-        for pub_list in temp_df[col_name].astype(str):
-            unique_publishers.update(pub.strip() for pub in pub_list.split(',') if pub.strip())
-        
-        for pub in sorted(unique_publishers):
-            new_col = f'publisher_{pub}'
-            temp_df[new_col] = temp_df[col_name].apply(lambda x: 1 if pub in str(x).split(',') else 0)
-        
-        temp_df = temp_df.drop(columns=[col_name])
-        return temp_df
-    
-    train = convert_publishers(train, 'publishers')
-    if not test.empty and 'publishers' in test.columns:
-        test = convert_publishers(test, 'publishers')
-    
-    # Обрабатываем отсутствующие значения
     for df in [train, test]:
         if not df.empty:
             num_cols = df.select_dtypes(include=np.number).columns
@@ -173,50 +126,19 @@ def preprocess_data(train, test, target_col):
                 if col != target_col and df[col].isnull().sum() > 0:
                     df[col] = df[col].fillna(df[col].median())
     
-    # Преобразовываем объектные типы в числовые
+    
     for df in [train, test]:
         if not df.empty:
-            obj_cols = df.select_dtypes(include='object').columns
-            for col in obj_cols:
-                if col != target_col:
-                    try:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                        print(f"Преобразовано {col} в числовой формат")
-                    except:
-                        df = df.drop(columns=[col])
-                        print(f"Удалена неконвертируемая колонка: {col}")
+            cat_cols = df.select_dtypes(exclude=np.number).columns
+            for col in cat_cols:
+                
+                df[col] = df[col].apply(lambda x: np.mean(list(map(float, x.split(',')))) if isinstance(x, str) and ',' in x else x)
     
-    # Генерируем новые признаки
-    num_cols = train.select_dtypes(include=np.number).columns
-    num_cols = [col for col in num_cols if col != target_col]
     
-    if len(num_cols) > 0:
-        for df in [train, test]:
-            if not df.empty:
-                for col in num_cols[:min(3, len(num_cols))]:
-                    if col in df.columns:
-                        if (df[col] >= 0).all():
-                            df[f'{col}_log'] = np.log1p(df[col])
-                        df[f'{col}_squared'] = df[col] ** 2
-    
-    # Обрабатываем выбросы
-    for col in num_cols:
-        if col in train.columns:
-            q1 = train[col].quantile(0.25)
-            q3 = train[col].quantile(0.75)
-            iqr = q3 - q1
-            lb = q1 - 1.5 * iqr
-            ub = q3 + 1.5 * iqr
-            
-            train[col] = np.clip(train[col], lb, ub)
-            if not test.empty and col in test.columns:
-                test[col] = np.clip(test[col], lb, ub)
-    
-    # Формируем массив признаков и целевую переменную
     X = train.drop(columns=[target_col])
     y = train[target_col]
     
-    # Преобразуем целевую переменную
+    
     if y.dtype == 'object':
         try:
             y = pd.to_numeric(y, errors='coerce')
@@ -228,16 +150,29 @@ def preprocess_data(train, test, target_col):
             y = y.astype('category').cat.codes
             print("Целевая переменная преобразована в категориальные коды")
     
-    # Тестовые данные
-    processed_test = test.drop(columns=[target_col]) if not test.empty and target_col in test.columns else test
-    test_ids = test['id'].copy() if not test.empty and 'id' in test.columns else None
+   
+    if not test.empty:
+        
+        test_ids = test['id'].values.copy()  
+        test = test.drop(columns=['id'])     
+       
+        if "Unnamed: 0" not in test.columns:
+            test["Unnamed: 0"] = np.arange(len(test))
+        
+        test = test[X.columns]
+    
+    
+    processed_test = test
     
     print("ПРЕДОБРАБОТКА ЗАВЕРШЕНА")
     print(f"Фичевые колонки: {list(X.columns)}")
     return X, y, processed_test, test_ids
 
+# Aнализ данных
 def analyze_data(X, y):
-    """Анализ данных с построением графиков и отображением статистик"""
+    """
+    Анализ данных и вывод базовой статистики
+    """
     print("\n== АНАЛИЗ ДАННЫХ ==")
     print(f"Размер данных: {X.shape}")
     print(f"Тип целевой переменной: {y.dtype}")
@@ -271,72 +206,6 @@ def analyze_data(X, y):
         plt.show()
     else:
         print("\nНет числовых признаков для анализа корреляций")
-
-# Создание препроцессора
-def create_preprocessor():
-    """Создание препроцессора для нормализации данных"""
-    transformer = Pipeline([
-        ('imputer', SimpleImputer(strategy='median')),  # Заполняем недостающие значения медианой
-        ('scaler', RobustScaler())                     # Масштабируем данные
-    ])
-    
-    preprocessor = ColumnTransformer(transformers=[
-        ('num', transformer, make_column_selector(dtype_include=np.number))  # Работаем только с численными признаками
-    ], remainder='drop')
-    
-    return preprocessor
-
-# Получение единственной модели логистической регрессии
-def get_logreg_model():
-    """Получение логистической регрессии с параметрами для GridSearch"""
-    lr_model = LogisticRegression(max_iter=1000, random_state=SEED)
-    params = {
-        'model__C': np.logspace(-3, 3, 7),  # Диапазон штрафов
-        'model__penalty': ['l1', 'l2'],     # Тип регуляризации
-        'model__solver': ['liblinear', 'saga'],  # Метод оптимизации
-        'model__class_weight': [None, 'balanced']  # Вес классов
-    }
-    return {'model': lr_model, 'params': params}
-
-# Обучение и оценка логистической регрессии
-def train_and_evaluate_logreg(X, y, preprocessor):
-    """Обучение и оценка логистической регрессии с GridSearchCV"""
-    model_cfg = get_logreg_model()
-    model = model_cfg['model']
-    params = model_cfg['params']
-    
-    pipe = Pipeline([
-        ('preprocessor', preprocessor),
-        ('model', model)
-    ])
-    
-    # Кросс-валидация
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
-    grid_search = GridSearchCV(
-        estimator=pipe,
-        param_grid=params,
-        cv=cv,
-        scoring='accuracy',
-        verbose=1,
-        n_jobs=-1
-    )
-    
-    grid_search.fit(X, y)
-    
-    # Лучший результат и параметры
-    best_estimator = grid_search.best_estimator_
-    best_params = grid_search.best_params_
-    best_score = grid_search.best_score_
-    
-    # Прогнозы на тренировочных данных
-    y_pred = best_estimator.predict(X)
-    train_acc = accuracy_score(y, y_pred)
-    
-    print(f"Лучший результат кросс-валидации: {best_score:.3f}")
-    print(f"Лучшие параметры: {best_params}")
-    print(f"Accuracy на тренировочных данных: {train_acc:.3f}")
-    
-    return best_estimator
 
 # Главная функция
 def main():
@@ -381,46 +250,68 @@ def main():
     
     print(f"Разделение данных: Train {X_train.shape}, Val {X_val.shape}")
     
-    # 6. Обучение и оценка логистической регрессии
-    print("\n=== ОБУЧЕНИЕ LOGISTIC REGRESSION ===")
-    preprocessor = create_preprocessor()
-    best_model = train_and_evaluate_logreg(X_train, y_train, preprocessor)
+    # 6. Выбор модели и настройка гиперпараметров
+    print("\n=== НАСТРОЙКА ГИПЕРПАРАМЕТРОВ ===")
+    # Оптимизация гиперпараметров с использованием GridSearchCV
+    rf_model = RandomForestClassifier(random_state=SEED)
+    param_grid = {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+    grid_search = GridSearchCV(rf_model, param_grid, cv=5, scoring='accuracy', verbose=1, n_jobs=-1)
+    grid_search.fit(X_train, y_train)
+    best_model = grid_search.best_estimator_
+    print(f"Лучшая модель: {best_model}")
     
-    # 7. Оценка на валидационном наборе
+    # 7. Прогнозирование и оценка на валидационном наборе
+    print("\n=== ПРОГНОЗИРОВАНИЕ НА VALIDATION SET ===")
     val_predictions = best_model.predict(X_val)
     val_accuracy = accuracy_score(y_val, val_predictions)
     print(f"\nФинальные результаты на validation set:")
     print(f"Validation Accuracy: {val_accuracy:.4f}")
-    print("Классификация Report:")
+    print("Classification Report:")
     print(classification_report(y_val, val_predictions))
     
-    # 8. Работа с тестовыми данными
+    # 8. Экспорт прогнозов
     if not X_test.empty and test_ids is not None:
-        print("\n=== ОБРАБОТКА ТЕСТОВЫХ ДАННЫХ ===")
+        print("\n== ПОДГОТОВКА К ПРЕДОСКАЗАНИЮ ==")
+        print("Структура тестовых данных:")
+        print(X_test.info())
+        print("Пример тестовых данных:")
+        print(X_test.head())
+        
         try:
             test_predictions = best_model.predict(X_test)
+            print("Размеры предсказанных классов:", test_predictions.shape)
+            print("Пример предсказанных классов:", test_predictions[:5])
             
+            # Создаем DataFrame с id и прогнозами
             submission_df = pd.DataFrame({
-                'id': test_ids,
+                'id': test_ids,                   # Сюда попали идентификаторы из тестового набора
                 'prediction': test_predictions
             })
             
-            submission_df.to_csv('submission_logreg.csv', index=False, encoding='utf-8')
-            print("Прогнозы логистической регрессии сохранены как 'submission_logreg.csv'")
+            # Сохраняем результаты в файл
+            submission_path = os.path.abspath('submission.csv')
+            submission_df.to_csv(submission_path, index=False, encoding='utf-8')
+            print("Файл 'submission.csv' успешно сохранен.")
             
         except Exception as e:
             print(f"Ошибка при предсказании на тестовых данных: {e}")
     
     # 9. Сохранение модели
     try:
-        joblib.dump(best_model, 'best_logreg_model.pkl')
-        print("Модель логистической регрессии сохранена как 'best_logreg_model.pkl'")
+        joblib.dump(best_model, 'best_model.pkl')
+        print("Модель сохранена как 'best_model.pkl'")
     except Exception as e:
         print(f"Ошибка при сохранении модели: {str(e)}")
 
     print("\n=== ЭКСПЕРИМЕНТ ЗАВЕРШЕН ===")
     print(f"Validation Accuracy: {val_accuracy:.4f}")
 
+
 # Запуск основной функции
 if __name__ == "__main__":
-    main()                                                                                                                                                                                                   
+    main()                                                                                                                                                                             
